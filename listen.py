@@ -17,7 +17,7 @@ def listen():
         print(f"Microphone unavailable ({exc}). Type your command instead.")
         if sys.stdin and sys.stdin.isatty():
             try:
-                return input("You (type): ").strip().lower()
+                return input("You (type): ").strip()
             except EOFError:
                 return ""
         return ""
@@ -25,7 +25,7 @@ def listen():
     try:
         command = r.recognize_google(audio)
         print("You:", command)
-        return command.lower()
+        return command.strip()
     except sr.UnknownValueError:
         return ""
     except sr.RequestError as exc:

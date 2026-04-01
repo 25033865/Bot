@@ -4,7 +4,7 @@ from speak import speak
 import time
 
 
-speak("Max is online")
+speak("Max is online. Say help to hear what I can do.")
 
 while True:
     command = listen()
@@ -13,8 +13,6 @@ while True:
         time.sleep(0.1)
         continue
 
-    if "exit" in command or "stop" in command:
-        speak("Shutting down")
+    should_continue = execute_command(command)
+    if not should_continue:
         break
-
-    execute_command(command)
