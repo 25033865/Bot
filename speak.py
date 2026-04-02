@@ -1,3 +1,6 @@
+import platform
+import subprocess
+
 import pyttsx3
 
 
@@ -20,13 +23,40 @@ except Exception as exc:
     engine = None
 
 
+def _speak_with_windows_sapi(text):
+    escaped_text = text.replace("'", "''")
+    script = (
+        "$voice = New-Object -ComObject SAPI.SpVoice;"
+        "$voice.Rate = 1;"
+        f"[void]$voice.Speak('{escaped_text}')"
+    )
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        error_details = (result.stderr or result.stdout or "").strip()
+        if not error_details:
+            error_details = f"PowerShell exited with code {result.returncode}"
+        raise RuntimeError(error_details)
+
+
 def speak(text):
     print("Jarvis:", text)
-    if engine is None:
-        return
 
-    try:
-        engine.say(text)
-        engine.runAndWait()
-    except Exception as exc:
-        print(f"Text-to-speech error: {exc}")
+    if platform.system().lower() == "windows":
+        try:
+            _speak_with_windows_sapi(text)
+            return
+        except Exception as exc:
+            print(f"Windows speech error: {exc}")
+
+    if engine is not None:
+        try:
+            engine.say(text)
+            engine.runAndWait()
+            return
+        except Exception as exc:
+            print(f"Text-to-speech error: {exc}")

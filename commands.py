@@ -2,9 +2,11 @@ import os
 import re
 import subprocess
 import webbrowser
+import json
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote_plus
+from urllib.request import urlopen
 
 from speak import speak
 
@@ -92,6 +94,9 @@ class AssistantBrain:
         if self._handle_keyboard_actions(command, normalized):
             return True
 
+        if self._handle_general_question(command, normalized):
+            return True
+
         speak(
             "I got that, but I don't have an action for it yet. "
             "Say help to hear what I can do."
@@ -133,6 +138,27 @@ class AssistantBrain:
 
         if "how are you" in normalized:
             speak("I'm running smoothly and ready to help.")
+            return True
+
+        if any(
+            phrase in normalized
+            for phrase in [
+                "i'm good",
+                "im good",
+                "i am good",
+                "i'm fine",
+                "im fine",
+                "i am fine",
+                "i'm doing well",
+                "im doing well",
+                "i am doing well",
+            ]
+        ):
+            speak("That's great to hear. How can I assist you today?")
+            return True
+
+        if any(phrase in normalized for phrase in ["who created you", "who made you"]):
+            speak("I was created by a talented developer named Rotondwa.")
             return True
 
         if "your name" in normalized or "who are you" in normalized:
@@ -302,6 +328,89 @@ class AssistantBrain:
             return True
 
         return False
+
+    def _handle_general_question(self, command, normalized):
+        question_starters = (
+            "who",
+            "what",
+            "when",
+            "where",
+            "why",
+            "how",
+            "which",
+            "is",
+            "are",
+            "can",
+            "could",
+            "should",
+            "would",
+            "do",
+            "does",
+            "did",
+        )
+
+        is_question = normalized.endswith("?") or any(
+            normalized.startswith(f"{starter} ") for starter in question_starters
+        )
+
+        if not is_question:
+            return False
+
+        answer = self._fetch_web_answer(command.strip())
+        if answer:
+            speak(answer)
+            return True
+
+        speak("I could not find a direct answer, so I opened a web search.")
+        webbrowser.open(f"https://www.google.com/search?q={quote_plus(command)}")
+        return True
+
+    def _fetch_web_answer(self, query):
+        endpoint = (
+            "https://api.duckduckgo.com/"
+            f"?q={quote_plus(query)}&format=json&no_html=1&skip_disambig=1"
+        )
+
+        try:
+            with urlopen(endpoint, timeout=6) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception:
+            return None
+
+        for key in ["AbstractText", "Definition", "Answer"]:
+            value = (payload.get(key) or "").strip()
+            if value:
+                return self._trim_spoken_answer(value)
+
+        for topic in payload.get("RelatedTopics") or []:
+            text = self._extract_related_text(topic)
+            if text:
+                return self._trim_spoken_answer(text)
+
+        return None
+
+    def _extract_related_text(self, topic):
+        if not isinstance(topic, dict):
+            return None
+
+        direct_text = (topic.get("Text") or "").strip()
+        if direct_text:
+            return direct_text
+
+        for nested_topic in topic.get("Topics") or []:
+            nested_text = self._extract_related_text(nested_topic)
+            if nested_text:
+                return nested_text
+
+        return None
+
+    def _trim_spoken_answer(self, text, max_chars=260):
+        clean_text = " ".join(text.split())
+        if len(clean_text) <= max_chars:
+            return clean_text
+
+        shortened = clean_text[:max_chars].rsplit(" ", 1)[0]
+        return f"{shortened}."
 
     def _request_confirmation(self, description, action):
         self.pending_confirmation = (description, action)
