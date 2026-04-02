@@ -1,8 +1,10 @@
 import os
 import re
+import time
 import subprocess
 import webbrowser
 import json
+import requests
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -14,6 +16,11 @@ try:
     import pyautogui
 except Exception:
     pyautogui = None
+
+try:
+    import pygetwindow as gw
+except Exception:
+    gw = None
 
 
 class AssistantBrain:
@@ -29,17 +36,29 @@ class AssistantBrain:
             "videos": self.home / "Videos",
         }
         self.apps = {
-            "chrome": "start chrome",
-            "edge": "start msedge",
-            "notepad": "start notepad",
-            "calculator": "start calc",
-            "paint": "start mspaint",
-            "explorer": "start explorer",
-            "file explorer": "start explorer",
-            "task manager": "start taskmgr",
-            "command prompt": "start cmd",
-            "powershell": "start powershell",
-            "settings": "start ms-settings:",
+            "chrome": "chrome.exe",
+            "edge": "msedge.exe",
+            "notepad": "notepad.exe",
+            "calculator": "calc.exe",
+            "calc": "calc.exe",
+            "paint": "mspaint.exe",
+            "explorer": "explorer.exe",
+            "file explorer": "explorer.exe",
+            "task manager": "taskmgr.exe",
+            "command prompt": "cmd.exe",
+            "powershell": "powershell.exe",
+            "terminal": "wt.exe",
+            "windows terminal": "wt.exe",
+            "control panel": "control.exe",
+            "settings": "ms-settings:",
+            "camera": "microsoft.windows.camera:",
+            "photos": "ms-photos:",
+            "snipping tool": "snippingtool.exe",
+            "word": "winword.exe",
+            "excel": "excel.exe",
+            "powerpoint": "powerpnt.exe",
+            "visual studio code": "code.cmd",
+            "vscode": "code.cmd",
         }
         self.websites = {
             "youtube": "https://youtube.com",
@@ -49,6 +68,8 @@ class AssistantBrain:
             "linkedin": "https://www.linkedin.com",
             "chatgpt": "https://chat.openai.com",
         }
+        self.ollama_url = os.getenv("BOT_OLLAMA_URL", "http://localhost:11434/api/generate")
+        self.ollama_model = os.getenv("BOT_OLLAMA_MODEL", "llama3")
 
         if pyautogui is not None:
             pyautogui.PAUSE = 0.05
@@ -91,10 +112,16 @@ class AssistantBrain:
         if self._handle_file_open(command, normalized):
             return True
 
+        if self._handle_window_navigation(command, normalized):
+            return True
+
         if self._handle_keyboard_actions(command, normalized):
             return True
 
         if self._handle_general_question(command, normalized):
+            return True
+
+        if self._handle_ollama_chat(command):
             return True
 
         speak(
@@ -192,6 +219,8 @@ class AssistantBrain:
         print("- Open apps: open chrome, open notepad, open calculator")
         print("- Open folders: open downloads, open documents")
         print("- Open file by name: open file budget.xlsx")
+        print("- Open apps by name: open spotify, open vscode, open calculator")
+        print("- Navigate windows: switch to chrome, next window, previous window")
         print("- Web: open youtube, search for python tutorials")
         print("- Keyboard control: type hello world, press ctrl+s")
         print("- Utility: take screenshot, what time is it")
@@ -244,11 +273,239 @@ class AssistantBrain:
         return False
 
     def _handle_apps(self, normalized):
-        for app_name, app_command in self.apps.items():
+        for app_name, app_target in self.apps.items():
             if f"open {app_name}" in normalized:
-                speak(f"Opening {app_name}.")
-                subprocess.Popen(app_command, shell=True)
+                if self._launch_app(app_target, window_hint=app_name):
+                    speak(f"Opening {app_name}.")
+                else:
+                    speak(f"I couldn't open {app_name}.")
                 return True
+
+        generic_open = re.search(r"^(?:please\s+)?open\s+(.+)$", normalized)
+        if generic_open:
+            requested_app = generic_open.group(1).strip()
+            if requested_app.startswith(("website ", "folder ", "file ")):
+                return False
+            if requested_app in self.websites:
+                return False
+
+            requested_app = re.sub(r"^(the\s+)?(app\s+|application\s+)?", "", requested_app).strip()
+            requested_app = re.sub(r"\s+(for me|please)$", "", requested_app).strip()
+            if not requested_app:
+                return False
+
+            if self._launch_any_app(requested_app):
+                speak(f"Opening {requested_app}.")
+            else:
+                speak(f"I couldn't open {requested_app}.")
+            return True
+
+        return False
+
+    def _launch_app(self, app_target, window_hint=None):
+        launched = False
+
+        try:
+            os.startfile(app_target)
+            launched = True
+        except Exception:
+            pass
+
+        if not launched:
+            # Fallback through cmd `start` so PATH-resolved executables still launch.
+            try:
+                subprocess.run(
+                    ["cmd", "/c", f'start "" "{app_target}"'],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                launched = True
+            except Exception:
+                pass
+
+        if not launched:
+            # Last fallback for shell aliases and URI-like app identifiers.
+            escaped_target = app_target.replace("'", "''")
+            script = f"Start-Process '{escaped_target}'"
+            try:
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                launched = True
+            except Exception:
+                pass
+
+        if launched and window_hint:
+            time.sleep(0.6)
+            self._activate_window(window_hint)
+
+        return launched
+
+    def _launch_any_app(self, app_name):
+        normalized_name = app_name.lower().strip()
+        mapped_target = self.apps.get(normalized_name)
+        if mapped_target and self._launch_app(mapped_target, window_hint=normalized_name):
+            return True
+
+        raw_target = app_name.strip().strip('"').strip("'")
+        if not raw_target:
+            return False
+
+        launch_candidates = [raw_target]
+        if not raw_target.lower().endswith((".exe", ".cmd", ".bat", ".lnk")):
+            launch_candidates.append(f"{raw_target}.exe")
+
+        compact_candidate = raw_target.replace(" ", "")
+        if compact_candidate and compact_candidate.lower() != raw_target.lower():
+            launch_candidates.append(f"{compact_candidate}.exe")
+
+        for candidate in launch_candidates:
+            if self._launch_app(candidate, window_hint=raw_target):
+                return True
+
+        return self._launch_start_menu_app(raw_target)
+
+    def _launch_start_menu_app(self, app_name):
+        escaped_name = app_name.replace("'", "''")
+        script = (
+            "$ErrorActionPreference='Stop';"
+            f"$target='{escaped_name}';"
+            "$app=Get-StartApps | Where-Object { $_.Name -like ('*' + $target + '*') } | Select-Object -First 1;"
+            "if ($null -eq $app) { exit 1 };"
+            "Start-Process ('shell:AppsFolder\\' + $app.AppID)"
+        )
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _handle_window_navigation(self, command, normalized):
+        if "next window" in normalized or "switch window" in normalized:
+            if not self._automation_available():
+                return True
+            pyautogui.hotkey("alt", "tab")
+            speak("Switched window.")
+            return True
+
+        if "previous window" in normalized or "last window" in normalized:
+            if not self._automation_available():
+                return True
+            pyautogui.hotkey("alt", "shift", "tab")
+            speak("Moved to previous window.")
+            return True
+
+        if "show desktop" in normalized:
+            if not self._automation_available():
+                return True
+            pyautogui.hotkey("win", "d")
+            speak("Showing desktop.")
+            return True
+
+        if any(phrase in normalized for phrase in ["close current window", "close this window", "close current app"]):
+            if not self._automation_available():
+                return True
+            pyautogui.hotkey("alt", "f4")
+            speak("Closed current window.")
+            return True
+
+        if any(phrase in normalized for phrase in ["minimize window", "minimize app", "minimize this"]):
+            if not self._automation_available():
+                return True
+            pyautogui.hotkey("win", "down")
+            speak("Minimized.")
+            return True
+
+        if any(phrase in normalized for phrase in ["maximize window", "maximize app", "maximize this"]):
+            if not self._automation_available():
+                return True
+            pyautogui.hotkey("win", "up")
+            speak("Maximized.")
+            return True
+
+        target_app = self._extract_navigation_target(command, normalized)
+        if not target_app:
+            return False
+
+        if self._activate_window(target_app):
+            speak(f"Switched to {target_app}.")
+            return True
+
+        if self._launch_any_app(target_app):
+            speak(f"Opening {target_app}.")
+            return True
+
+        speak(f"I couldn't find or open {target_app}.")
+        return True
+
+    def _extract_navigation_target(self, command, normalized):
+        navigation_match = re.search(
+            r"(?:switch|navigate|focus|move|go)\s+(?:to|on)?\s+(.+)",
+            normalized,
+        )
+        if not navigation_match:
+            return None
+
+        target = navigation_match.group(1).strip()
+        if target in {"next", "previous", "window", "desktop"}:
+            return None
+
+        target = re.sub(r"\b(app|application|window)\b$", "", target).strip()
+        if not target:
+            return None
+
+        return target
+
+    def _activate_window(self, target_app):
+        if gw is None:
+            return False
+
+        try:
+            titles = [title for title in gw.getAllTitles() if title and title.strip()]
+        except Exception:
+            return False
+
+        if not titles:
+            return False
+
+        target_lower = target_app.lower().strip()
+        direct_matches = [title for title in titles if target_lower in title.lower()]
+
+        if not direct_matches:
+            target_tokens = [token for token in re.findall(r"[a-z0-9]+", target_lower) if len(token) > 1]
+            ranked_matches = []
+            for title in titles:
+                title_lower = title.lower()
+                score = sum(1 for token in target_tokens if token in title_lower)
+                if score:
+                    ranked_matches.append((score, len(title), title))
+
+            ranked_matches.sort(key=lambda item: (-item[0], item[1]))
+            direct_matches = [item[2] for item in ranked_matches[:3]]
+
+        for matched_title in direct_matches[:5]:
+            try:
+                windows = gw.getWindowsWithTitle(matched_title)
+                if not windows:
+                    continue
+
+                window = windows[0]
+                if getattr(window, "isMinimized", False):
+                    window.restore()
+                    time.sleep(0.2)
+                window.activate()
+                return True
+            except Exception:
+                continue
 
         return False
 
@@ -320,13 +577,6 @@ class AssistantBrain:
             speak("Done.")
             return True
 
-        if "switch window" in normalized or "next window" in normalized:
-            if not self._automation_available():
-                return True
-            pyautogui.hotkey("alt", "tab")
-            speak("Switched window.")
-            return True
-
         return False
 
     def _handle_general_question(self, command, normalized):
@@ -356,6 +606,11 @@ class AssistantBrain:
         if not is_question:
             return False
 
+        ollama_answer = self._fetch_ollama_answer(command.strip())
+        if ollama_answer:
+            speak(ollama_answer)
+            return True
+
         answer = self._fetch_web_answer(command.strip())
         if answer:
             speak(answer)
@@ -364,6 +619,39 @@ class AssistantBrain:
         speak("I could not find a direct answer, so I opened a web search.")
         webbrowser.open(f"https://www.google.com/search?q={quote_plus(command)}")
         return True
+
+    def _handle_ollama_chat(self, command):
+        answer = self._fetch_ollama_answer(command.strip())
+        if not answer:
+            return False
+
+        speak(answer)
+        return True
+
+    def _fetch_ollama_answer(self, query):
+        if not query:
+            return None
+
+        payload = {
+            "model": self.ollama_model,
+            "prompt": (
+                "You are Max, a desktop voice assistant. "
+                "Respond briefly, clearly, and helpfully.\n"
+                f"User: {query}"
+            ),
+            "stream": False,
+        }
+
+        try:
+            response = requests.post(self.ollama_url, json=payload, timeout=45)
+            response.raise_for_status()
+            data = response.json()
+            answer = (data.get("response") or "").strip()
+            if not answer:
+                return None
+            return self._trim_spoken_answer(answer, max_chars=320)
+        except Exception:
+            return None
 
     def _fetch_web_answer(self, query):
         endpoint = (

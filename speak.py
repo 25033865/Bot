@@ -45,18 +45,23 @@ def _speak_with_windows_sapi(text):
 
 def speak(text):
     print("Jarvis:", text)
+    errors = []
 
-    if platform.system().lower() == "windows":
-        try:
-            _speak_with_windows_sapi(text)
-            return
-        except Exception as exc:
-            print(f"Windows speech error: {exc}")
-
+    # Prefer in-process TTS first; it avoids spawning PowerShell per utterance.
     if engine is not None:
         try:
             engine.say(text)
             engine.runAndWait()
             return
         except Exception as exc:
-            print(f"Text-to-speech error: {exc}")
+            errors.append(f"pyttsx3: {exc}")
+
+    if platform.system().lower() == "windows":
+        try:
+            _speak_with_windows_sapi(text)
+            return
+        except Exception as exc:
+            errors.append(f"windows-sapi: {exc}")
+
+    if errors:
+        print("Text-to-speech unavailable:", " | ".join(errors))
